@@ -235,3 +235,35 @@ def test_statement_totals_are_checked_per_account():
     assert [g["gap"] for g in gaps if g["kind"] == "cdsl"] == [287000]
     assert statement_gaps([{"label": "x", "statement": 100000, "read": 99990}]) == []  # rounding noise is fine
     assert "12081600123456" not in str(accounts)
+
+
+def test_etf_market_price_never_overwrites_its_nav(monkeypatch):
+    """An ETF's ISIN is in both the AMFI NAV file and the NSE bhavcopy. Demat units are worth the
+    NSE close (as on the statement); folio units are worth the NAV; neither source overwrites the other."""
+    import asyncio
+
+    from kosh_api import analytics, prices
+
+    etf = {"_id": "INF247L01AP3", "kind": "stock", "symbol": "MON100", "series": "EQ", "price": 296.98, "prev_price": 298.89, "date": "2026-11-23"}
+    assert prices._nse_update(etf) == {"$set": {"exchange": {"symbol": "MON100", "series": "EQ", "price": 296.98, "prev_price": 298.89, "date": "2026-11-23"}}}
+    stock = {"_id": "INE040A01034", "kind": "stock", "price": 817.8, "date": "2026-11-23"}
+    assert prices._nse_update(stock) == {"$set": stock}
+
+    doc = {"_id": "INF247L01AP3", "kind": "mf", "price": 242.8249, "date": "2026-11-23", "exchange": etf | {"_id": None}}
+
+    async def latest(isins):
+        return {"INF247L01AP3": doc}
+
+    monkeypatch.setattr(prices, "latest", latest)
+    h = {
+        "mf": [
+            {"id": "a", "isin": "INF247L01AP3", "name": "MON100", "units": 96.0, "nav": 285.17, "value": 27376.32, "held_in": "demat", "as_of": "2026-10-31"},
+            {"id": "b", "isin": "INF247L01AP3", "name": "MON100", "units": 10.0, "nav": 240.0, "value": 2400.0, "held_in": "folio", "as_of": "2026-10-31"},
+        ],
+        "stocks": [], "bonds": [], "nps": None,
+    }
+    v = asyncio.run(analytics.value_holdings(h))
+    demat, folio = v["mf"]
+    assert demat["price"] == 296.98 and demat["value"] == round(96 * 296.98, 2)
+    assert demat["day_change"] == round(96 * (296.98 - 298.89), 2)
+    assert folio["price"] == 242.8249 and folio["value"] == round(10 * 242.8249, 2)

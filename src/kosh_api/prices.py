@@ -163,6 +163,16 @@ def parse_bhavcopy(raw_zip: bytes) -> list[dict]:
     return list(best.values())
 
 
+def _nse_update(row: dict) -> dict:
+    """Stocks keep their NSE close as the price. ETFs (INF… ISINs) share their ISIN with the AMFI NAV
+    row, so their market close goes in a separate `exchange` field: the two sources must never overwrite
+    each other. Units held in demat are worth the market price; units in a folio are worth the NAV."""
+    if not row["_id"].startswith("INF"):
+        return {"$set": row}
+    keep = ("symbol", "series", "price", "prev_price", "date")
+    return {"$set": {"exchange": {k: row.get(k) for k in keep}}}
+
+
 async def _refresh_nse(client: httpx.AsyncClient) -> int:
     today = datetime.now(UTC) + timedelta(hours=5, minutes=30)
     for back in range(0, 7):
@@ -170,7 +180,7 @@ async def _refresh_nse(client: httpx.AsyncClient) -> int:
         r = await client.get(NSE_URL.format(d=d))
         if r.status_code == 200 and r.content[:2] == b"PK":
             rows = parse_bhavcopy(r.content)
-            ops = [UpdateOne({"_id": x["_id"]}, {"$set": x}, upsert=True) for x in rows]
+            ops = [UpdateOne({"_id": x["_id"]}, _nse_update(x), upsert=True) for x in rows]
             for i in range(0, len(ops), 2000):
                 await db.prices.bulk_write(ops[i : i + 2000], ordered=False)
             return len(rows)

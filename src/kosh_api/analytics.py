@@ -88,7 +88,16 @@ async def value_holdings(h: dict) -> dict:
         item["category"] = (p or {}).get("category")
         if p and p.get("plan"):
             item["plan"] = p["plan"]
-        if _fresh(p, m.get("as_of")):
+        if m.get("held_in") == "demat" and _fresh((p or {}).get("exchange"), m.get("as_of")):
+            # an ETF in demat: what it would sell for on NSE, as the statement values it
+            x = p["exchange"]
+            item["price"] = x["price"]
+            item["price_date"] = x.get("date")
+            item["price_source"] = "nse"
+            item["value"] = round(m["units"] * x["price"], 2)
+            if x.get("prev_price"):
+                item["day_change"] = round(m["units"] * (x["price"] - x["prev_price"]), 2)
+        elif _fresh(p, m.get("as_of")):
             item["price"] = p["price"]
             item["price_date"] = p.get("date")
             item["value"] = round(m["units"] * p["price"], 2)
