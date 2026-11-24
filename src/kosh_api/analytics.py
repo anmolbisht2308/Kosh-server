@@ -175,8 +175,12 @@ async def summarize(holdings: dict, statements: list[dict]) -> dict:
     day_change = sum(x.get("day_change", 0.0) for x in v["mf"] + v["stocks"])
 
     insights = await build_insights(v, total, statements, today)
+    # the same holdings at the prices printed on the statement, so the headline can be tied back to the PDF
+    at_statement = sum(m.get("value") or 0.0 for m in holdings["mf"] + holdings["stocks"] + holdings["bonds"]) + total_nps
     return {
         "total": round(total, 2),
+        "statement_value": round(at_statement, 2),
+        "statement_date": max((s.get("period_to") or "" for s in statements), default="") or None,
         "day_change": round(day_change, 2),
         "mf": {"value": round(total_mf, 2), "invested": round(invested, 2), "gain": round(sum(m["value"] for m in known_cost) - invested, 2), "cost_known_for": len(known_cost), "count": len(v["mf"])},
         "stocks": {"value": round(total_st, 2), "count": len(v["stocks"])},
