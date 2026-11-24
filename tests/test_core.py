@@ -191,3 +191,47 @@ def test_normalize_cdsl_and_merge_without_double_counting():
     hdfc = next(m for m in view["mf"] if m["isin"] == "INF179K01CR2")
     assert hdfc["transactions"]  # the CAMS copy (with history) wins
 
+
+
+# ---------------- statement layouts casparser misses ----------------
+def _row(*texts):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(cells=[SimpleNamespace(text=t) for t in texts])
+
+
+def test_cdsl_summary_rows_with_broker_in_its_own_cell():
+    """A long broker name gets its own cell on page 2; without casfix that whole account was dropped."""
+    from casparser.parsers import cdsl
+
+    import kosh_api.casfix  # noqa: F401
+
+    usual = _row("CDSL Demat Account", "GROWW INVEST TECH PRIVATE LIMITED\nDP Id: 12088701 Client Id :11112222", "23", "3,33,434.01")
+    ids_first = _row("CDSL Demat Account", "DP Id: 12083400 Client Id :33334444", "RAISE SECURITIES PRIVATE LIMITED", "24", "1,47,004.66")
+    broker_first = _row("NSDL Demat Account", "WINT SECURITIES PRIVATE LIMITED", "DP Id: IN304633 Client Id :55556666", "0", "0.00")
+    folios = _row("Mutual Fund Folios", "13 Folios", "13", "5,54,024.59")
+    for r in (usual, ids_first, broker_first):
+        assert cdsl._is_summary_demat_row(r)
+    assert not cdsl._is_summary_demat_row(folios)
+
+    ac, key = cdsl._account_from_summary_row(ids_first, [])
+    assert ac.name == "RAISE SECURITIES PRIVATE LIMITED" and str(ac.balance) == "147004.66" and ac.folios == 24
+    assert key == ("CDSL", "12083400", "33334444")  # matches the account header on the holdings pages
+    ac, key = cdsl._account_from_summary_row(broker_first, [])
+    assert ac.name == "WINT SECURITIES PRIVATE LIMITED" and key == ("NSDL", "IN304633", "55556666")
+    ac, _ = cdsl._account_from_summary_row(usual, [])
+    assert ac.name == "GROWW INVEST TECH PRIVATE LIMITED" and str(ac.balance) == "333434.01"
+
+
+def test_statement_totals_are_checked_per_account():
+    from kosh_api.normalize import statement_gaps
+
+    demat = normalize(NSDLCASData.model_validate(CDSL), "ecas.pdf")
+    accounts = demat["meta"]["accounts"]
+    zerodha = next(a for a in accounts if a["kind"] == "cdsl")
+    assert zerodha["statement"] == 300000 and zerodha["read"] == 13000  # statement says more than was itemised
+    assert demat["meta"]["statement_total"] == 320000
+    gaps = statement_gaps(accounts)
+    assert [g["gap"] for g in gaps if g["kind"] == "cdsl"] == [287000]
+    assert statement_gaps([{"label": "x", "statement": 100000, "read": 99990}]) == []  # rounding noise is fine
+    assert "12081600123456" not in str(accounts)

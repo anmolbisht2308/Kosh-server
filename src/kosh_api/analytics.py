@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 
 from . import prices
+from .normalize import statement_gaps
 
 
 # ---------------- XIRR ----------------
@@ -190,6 +191,18 @@ async def build_insights(v: dict, total: float, statements: list[dict], today: d
     out: list[dict] = []
     if total <= 0:
         return out
+
+    # 0. the statement prints a total per account; say so if we itemised less than it shows
+    gaps = [g for s in statements for g in statement_gaps(s.get("accounts") or [])]
+    if gaps:
+        missing = sum(g["gap"] for g in gaps)
+        out.append({
+            "id": "statement-gap",
+            "tone": "warn",
+            "title": f"₹{abs(missing):,.0f} on your statement isn't itemised here",
+            "body": "Your statement's own account totals don't match the holdings Kosh could read line by line, so the totals here are lower than they should be. The accounts below are the ones affected.",
+            "rows": [{"name": g["label"], "value": g["gap"]} for g in gaps],
+        })
 
     # 1. what Regular plans cost compared with the Direct plan of the same fund
     regular = [m for m in v["mf"] if m.get("plan") == "regular" and m.get("isin") and m["value"] > 0]

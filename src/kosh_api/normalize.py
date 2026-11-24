@@ -15,6 +15,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from . import casfix  # noqa: F401  (fixes casparser layouts it misses; applied on import)
+
 RTA_TYPES = {"CAMS", "KFINTECH"}
 DEMAT_TYPES = {"NSDL", "CDSL"}
 
@@ -148,10 +150,12 @@ def from_demat(cas: Any, as_of_default: str | None) -> dict:
     mfs: list[dict] = []
     stocks: list[dict] = []
     bonds: list[dict] = []
+    accounts: list[dict] = []
     for acc in _get(cas, "accounts", []) or []:
         acc_type = str(_get(acc, "type") or "")
         is_folios = acc_type.lower().startswith("mutual fund folios")
         label = "Mutual fund folios" if is_folios else f"{_get(acc, 'name') or acc_type} {mask(_get(acc, 'client_id')) or ''}".strip()
+        start = (len(mfs), len(stocks), len(bonds))
         for e in _get(acc, "equities", []) or []:
             qty = _f(_get(e, "num_shares")) or 0.0
             if qty <= 0:
@@ -213,6 +217,15 @@ def from_demat(cas: Any, as_of_default: str | None) -> dict:
                     "as_of": as_of_default,
                 }
             )
+        read = sum(x["value"] for x in mfs[start[0] :] + stocks[start[1] :] + bonds[start[2] :])
+        accounts.append(
+            {
+                "label": label,
+                "kind": "folios" if is_folios else "nsdl" if "nsdl" in acc_type.lower() else "cdsl",
+                "statement": _f(_get(acc, "balance")),
+                "read": round(read, 2),
+            }
+        )
     nps = None
     raw_nps = _get(cas, "nps")
     if raw_nps:
@@ -224,7 +237,22 @@ def from_demat(cas: Any, as_of_default: str | None) -> dict:
             ],
             "as_of": as_of_default,
         }
-    return {"mf": mfs, "stocks": stocks, "bonds": bonds, "nps": nps}
+    if nps:
+        accounts.append({"label": "NPS", "kind": "nps", "statement": nps["value"], "read": nps["value"]})
+    return {"mf": mfs, "stocks": stocks, "bonds": bonds, "nps": nps, "_accounts": accounts}
+
+
+def statement_gaps(accounts: list[dict]) -> list[dict]:
+    """Accounts where what Kosh itemised falls short of the total the statement itself prints."""
+    out = []
+    for a in accounts:
+        stmt, read = a.get("statement"), a.get("read") or 0.0
+        if stmt is None:
+            continue
+        gap = stmt - read
+        if abs(gap) > max(100.0, 0.005 * stmt):
+            out.append({**a, "gap": round(gap, 2)})
+    return out
 
 
 def investor_name(cas: Any) -> str | None:
@@ -241,6 +269,8 @@ def normalize(cas: Any, filename: str | None = None) -> dict:
         holdings = {"mf": from_rta(cas, as_of), "stocks": [], "bonds": [], "nps": None}
     elif meta["family"] == "demat":
         holdings = from_demat(cas, as_of)
+        meta["accounts"] = holdings.pop("_accounts")
+        meta["statement_total"] = round(sum(a["statement"] or 0.0 for a in meta["accounts"]), 2)
     else:
         raise ValueError("This doesn't look like a CAS from CAMS, KFintech, NSDL or CDSL")
     meta["counts"] = {k: len(v) for k, v in holdings.items() if isinstance(v, list)}
