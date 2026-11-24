@@ -1,0 +1,37 @@
+[project]
+name = "kosh-api"
+version = "0.1.0"
+description = "Kosh API: one view of your mutual funds and stocks from the free CAS statement"
+authors = [
+    { name = "anmolbisht2308", email = "anmolbisht7@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "casparser>=1.4.1",
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "pyjwt>=2.15.1",
+    "pymongo>=4.20.1",
+    "python-multipart>=0.0.34",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+kosh-api = "kosh_api:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pypdf>=7.1.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "reportlab>=5.1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
