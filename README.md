@@ -65,7 +65,7 @@ Open http://localhost:3300. Sign up and press **Try a sample portfolio**, or upl
 ```bash
 cd api && FETCH_PRICES=false uv run pytest
 ```
-These 9 unit tests cover XIRR, the AMFI and NSE parsers, statement normalising, and de-duplication.
+These unit tests cover XIRR, the AMFI and NSE parsers, statement normalising, de-duplication, ETF pricing and the rate limits.
 
 ```bash
 cd web && npx playwright test

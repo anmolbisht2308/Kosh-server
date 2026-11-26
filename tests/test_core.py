@@ -267,3 +267,31 @@ def test_etf_market_price_never_overwrites_its_nav(monkeypatch):
     assert demat["price"] == 296.98 and demat["value"] == round(96 * 296.98, 2)
     assert demat["day_change"] == round(96 * (296.98 - 298.89), 2)
     assert folio["price"] == 242.8249 and folio["value"] == round(10 * 242.8249, 2)
+
+
+def test_rate_limit_key_ignores_spoofed_forwarded_for():
+    from types import SimpleNamespace
+
+    from kosh_api.security import client_ip
+
+    req = lambda xff: SimpleNamespace(headers={"x-forwarded-for": xff} if xff else {}, client=SimpleNamespace(host="9.9.9.9"))  # noqa: E731
+    # Cloud Run appends the real address last; whatever the caller sent comes first
+    assert client_ip(req("10.0.0.1, 203.0.113.7")) == "203.0.113.7"
+    assert client_ip(req("10.0.0.2, 203.0.113.7")) == "203.0.113.7"
+    assert client_ip(req(None)) == "9.9.9.9"
+
+
+def test_only_failed_attempts_count_toward_the_limit():
+    import pytest
+    from fastapi import HTTPException
+
+    from kosh_api.security import RateLimiter
+
+    lim = RateLimiter(limit=3, window=60)
+    for _ in range(10):
+        lim.guard("ok")  # successful logins never lock anyone out
+    for _ in range(3):
+        lim.guard("bad")
+        lim.hit("bad")
+    with pytest.raises(HTTPException):
+        lim.guard("bad")

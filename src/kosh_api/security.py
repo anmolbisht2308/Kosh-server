@@ -62,14 +62,25 @@ class RateLimiter:
         self.limit, self.window = limit, window
         self.hits: dict[str, deque[float]] = defaultdict(deque)
 
-    def check(self, key: str) -> None:
+    def _live(self, key: str) -> deque[float]:
         now = time.monotonic()
         q = self.hits[key]
         while q and now - q[0] > self.window:
             q.popleft()
-        if len(q) >= self.limit:
+        return q
+
+    def guard(self, key: str) -> None:
+        """Refuse if this key is already over the limit (doesn't count as an attempt)."""
+        if len(self._live(key)) >= self.limit:
             raise HTTPException(429, "Too many attempts. Please wait a few minutes and try again.")
-        q.append(now)
+
+    def hit(self, key: str) -> None:
+        """Count one attempt (for logins: only failed ones, so a right password never locks anyone out)."""
+        self._live(key).append(time.monotonic())
+
+    def check(self, key: str) -> None:
+        self.guard(key)
+        self.hit(key)
 
 
 login_limiter = RateLimiter(limit=10, window=15 * 60)  # keyed by IP + email, so one person's typos don't block others
@@ -79,5 +90,10 @@ upload_limiter = RateLimiter(limit=20, window=60 * 60)
 
 
 def client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+    """The caller's IP as seen by Cloud Run's front end. That proxy appends the real address to the END of
+    X-Forwarded-For; anything earlier in the header was sent by the client and can be made up, so it must
+    never be used as a rate-limit key."""
+    fwd = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
+    if fwd:
+        return fwd[-1]
+    return request.client.host if request.client else "?"

@@ -71,9 +71,30 @@ async def http_error(_req: Request, exc: HTTPException):
 @app.exception_handler(RequestValidationError)
 async def validation_error(_req: Request, exc: RequestValidationError):
     first = exc.errors()[0] if exc.errors() else {}
-    field = ".".join(str(p) for p in first.get("loc", [])[1:])
-    msg = first.get("msg", "Invalid input").removeprefix("Value error, ")
-    return JSONResponse({"error": f"{field}: {msg}" if field else msg}, status_code=400)
+    field = str((first.get("loc") or ["", ""])[-1])
+    label = FIELD_LABELS.get(field, "This field")
+    limit = (first.get("ctx") or {}).get("max_length") or (first.get("ctx") or {}).get("min_length")
+    kind = first.get("type", "")
+    if kind == "string_too_long":
+        msg = f"{label} is too long (at most {limit} characters)"
+    elif kind == "string_too_short":
+        msg = f"{label} must be at least {limit} characters"
+    elif kind == "missing":
+        msg = f"{label} is required"
+    else:
+        msg = first.get("msg", "Invalid input").removeprefix("Value error, ")
+    return JSONResponse({"error": msg}, status_code=400)
+
+
+FIELD_LABELS = {
+    "email": "Email",
+    "password": "Password",
+    "new_password": "New password",
+    "current_password": "Current password",
+    "name": "Name",
+    "recovery_code": "Recovery code",
+    "file": "The file",
+}
 
 
 # ---------------- auth ----------------
@@ -149,9 +170,11 @@ async def signup(body: SignupIn, request: Request):
 @app.post("/api/auth/login")
 async def login(body: LoginIn, request: Request):
     email = body.email.strip().lower()
-    login_limiter.check(f"login:{client_ip(request)}:{email}")
+    key = f"login:{client_ip(request)}:{email}"
+    login_limiter.guard(key)
     u = await db.users.find_one({"email": email})
     if not u or not check_secret(body.password, u.get("password_hash")):
+        login_limiter.hit(key)
         raise HTTPException(401, "Email or password is wrong")
     return {"token": sign_token(str(u["_id"]), u.get("token_version", 0)), "user": _public(u)}
 
@@ -160,9 +183,11 @@ async def login(body: LoginIn, request: Request):
 async def recover(body: RecoverIn, request: Request):
     """Forgot password: the recovery code from sign-up sets a new password and issues a new code."""
     email = body.email.strip().lower()
-    login_limiter.check(f"recover:{client_ip(request)}:{email}")
+    key = f"recover:{client_ip(request)}:{email}"
+    login_limiter.guard(key)
     u = await db.users.find_one({"email": email})
     if not u or not check_secret(normalize_recovery(body.recovery_code), u.get("recovery_hash")):
+        login_limiter.hit(key)
         raise HTTPException(401, "That email and recovery code don't match")
     code = new_recovery_code()
     v = u.get("token_version", 0) + 1
@@ -177,9 +202,11 @@ async def me(u: dict = Depends(current_user)):
 
 @app.post("/api/me/password")
 async def change_password(body: PasswordIn, request: Request, u: dict = Depends(current_user)):
-    login_limiter.check(f"password:{client_ip(request)}:{u['_id']}")
+    key = f"password:{u['_id']}"
+    login_limiter.guard(key)
     if not check_secret(body.current_password, u.get("password_hash")):
-        raise HTTPException(401, "Current password is wrong")
+        login_limiter.hit(key)
+        raise HTTPException(403, "Current password is wrong")
     v = u.get("token_version", 0) + 1  # logs out every other device
     await db.users.update_one({"_id": u["_id"]}, {"$set": {"password_hash": hash_secret(body.new_password), "token_version": v}})
     return {"token": sign_token(str(u["_id"]), v)}
@@ -187,8 +214,11 @@ async def change_password(body: PasswordIn, request: Request, u: dict = Depends(
 
 @app.post("/api/me/recovery-code")
 async def rotate_recovery(body: DeleteIn, u: dict = Depends(current_user)):
+    key = f"password:{u['_id']}"
+    login_limiter.guard(key)
     if not check_secret(body.password, u.get("password_hash")):
-        raise HTTPException(401, "Password is wrong")
+        login_limiter.hit(key)
+        raise HTTPException(403, "Password is wrong")
     code = new_recovery_code()
     await db.users.update_one({"_id": u["_id"]}, {"$set": {"recovery_hash": hash_secret(code)}})
     return {"recovery_code": code}
@@ -196,8 +226,11 @@ async def rotate_recovery(body: DeleteIn, u: dict = Depends(current_user)):
 
 @app.post("/api/me/delete")
 async def delete_account(body: DeleteIn, u: dict = Depends(current_user)):
+    key = f"password:{u['_id']}"
+    login_limiter.guard(key)
     if not check_secret(body.password, u.get("password_hash")):
-        raise HTTPException(401, "Password is wrong")
+        login_limiter.hit(key)
+        raise HTTPException(403, "Password is wrong")
     await db.portfolios.delete_one({"_id": str(u["_id"])})
     await db.users.delete_one({"_id": u["_id"]})
     return {"deleted": True}
@@ -268,9 +301,16 @@ async def load_demo(u: dict = Depends(current_user)):
 
 
 # ---------------- portfolio ----------------
+_refresh_task: asyncio.Task | None = None
+
+
 async def _fresh_prices():
+    """Give a due price refresh a few seconds; if it takes longer, show cached prices and let it finish."""
+    global _refresh_task
+    if _refresh_task is None or _refresh_task.done():
+        _refresh_task = asyncio.create_task(prices.refresh())
     try:
-        await asyncio.wait_for(prices.refresh(), timeout=25)
+        await asyncio.wait_for(asyncio.shield(_refresh_task), timeout=6)
     except asyncio.TimeoutError:
         log.warning("price refresh still running; using cached prices")
 
@@ -315,7 +355,7 @@ async def fund_detail(fund_id: str, u: dict = Depends(current_user)):
 @app.get("/api/portfolio/export.csv")
 async def export_csv(u: dict = Depends(current_user)):
     p = await db.portfolios.find_one({"_id": str(u["_id"])})
-    if not p:
+    if not p or not (p.get("rta") or p.get("demat")):
         raise HTTPException(404, "Nothing to export yet")
     s = await analytics.summarize(merged(p), _statements(p))
     buf = io.StringIO()

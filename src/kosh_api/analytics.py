@@ -220,7 +220,7 @@ async def build_insights(v: dict, total: float, statements: list[dict], today: d
     # 1. what Regular plans cost compared with the Direct plan of the same fund
     regular = [m for m in v["mf"] if m.get("plan") == "regular" and m.get("isin") and m["value"] > 0]
     try:  # free history API; never let it slow the dashboard down for long
-        gaps = await asyncio.wait_for(asyncio.gather(*(prices.plan_gap(m["isin"]) for m in regular[:25])), timeout=15)
+        gaps = await asyncio.wait_for(asyncio.gather(*(prices.plan_gap(m["isin"]) for m in regular[:25])), timeout=8)
     except (asyncio.TimeoutError, Exception):
         gaps = [None] * len(regular[:25])
     rows = []
